@@ -40,8 +40,13 @@ def build_model():
     return nn.Linear(2, 1)
 
 
-def train_ivon(model, x, y, cfg: TrainConfig):
-    optimizer = ivon.IVON(model.parameters(), lr=cfg.lr, ess=len(x))
+def train_ivon(model, x, y, cfg: TrainConfig, use_low_rank: bool):
+    Optimizer = ivon.IVONLR if use_low_rank else ivon.IVON
+    optimizer = Optimizer(
+        model.parameters(),
+        lr=cfg.lr,
+        ess=len(x),
+    )
     loss_fn = nn.BCEWithLogitsLoss()
 
     for _ in range(cfg.epochs):
@@ -139,26 +144,20 @@ def plot_results(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Visual 2-D logistic regression test comparing IVON and SGD."
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        default=Path("plots/ivon_2d_logreg.png"),
-        help="Output path for the plot.",
-    )
-    parser.add_argument("--epochs", type=int, default=2000)
-    args = parser.parse_args()
+    out_path = Path("plots/ivon_2d_logreg.png")
+    use_low_rank = True
+    epochs = 2000
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(11)
 
-    cfg = TrainConfig(epochs=args.epochs)
+    cfg = TrainConfig(epochs=epochs)
     x_train, y_train = make_data(n_per_class=120, device=device)
 
     model_ivon = build_model().to(device)
-    optimizer_ivon = train_ivon(model_ivon, x_train, y_train, cfg)
+    optimizer_ivon = train_ivon(
+        model_ivon, x_train, y_train, cfg, use_low_rank
+    )
 
     model_sgd = build_model().to(device)
     train_sgd(model_sgd, x_train, y_train, cfg)
@@ -175,7 +174,7 @@ def main():
     sgd_prob = predict_deterministic(model_sgd, grid_x)
 
     plot_results(
-        args.out,
+        out_path,
         x_train,
         y_train,
         grid_x,
