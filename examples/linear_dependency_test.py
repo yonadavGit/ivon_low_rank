@@ -104,14 +104,20 @@ def plot_results(samples_ivon, samples_ivonlr, w_true_sum=3.0):
     ax.grid(True, alpha=0.3)
     ax.set_aspect('equal')
 
-    # Set same limits
-    all_samples = torch.cat([samples_ivon, samples_ivonlr])
-    xlim = [all_samples[:, 0].min()-0.5, all_samples[:, 0].max()+0.5]
-    ylim = [all_samples[:, 1].min()-0.5, all_samples[:, 1].max()+0.5]
-    axes[0].set_xlim(xlim)
-    axes[0].set_ylim(ylim)
-    axes[1].set_xlim(xlim)
-    axes[1].set_ylim(ylim)
+    # Set independent limits for each plot to show structure clearly
+    # IVON gets its own natural scale
+    ivon_margin = 0.5
+    xlim_ivon = [samples_ivon[:, 0].min()-ivon_margin, samples_ivon[:, 0].max()+ivon_margin]
+    ylim_ivon = [samples_ivon[:, 1].min()-ivon_margin, samples_ivon[:, 1].max()+ivon_margin]
+    axes[0].set_xlim(xlim_ivon)
+    axes[0].set_ylim(ylim_ivon)
+
+    # IVONLR gets its own scale
+    ivonlr_margin = 0.5
+    xlim_ivonlr = [samples_ivonlr[:, 0].min()-ivonlr_margin, samples_ivonlr[:, 0].max()+ivonlr_margin]
+    ylim_ivonlr = [samples_ivonlr[:, 1].min()-ivonlr_margin, samples_ivonlr[:, 1].max()+ivonlr_margin]
+    axes[1].set_xlim(xlim_ivonlr)
+    axes[1].set_ylim(ylim_ivonlr)
 
     # 3. Comparison
     ax = axes[2]
@@ -212,14 +218,16 @@ def main():
     print("RESULTS")
     print("="*70)
 
-    # Print learned parameters (posterior means)
+    # Print learned parameters (posterior means and stds)
     mean_ivon = samples_ivon.mean(dim=0)
+    std_ivon = samples_ivon.std(dim=0)
     mean_ivonlr = samples_ivonlr.mean(dim=0)
+    std_ivonlr = samples_ivonlr.std(dim=0)
 
-    print(f"\nLearned parameters (posterior mean):")
-    print(f"  True:   w₁={1.5:.4f}, w₂={1.5:.4f}, sum={3.0:.4f}")
-    print(f"  IVON:   w₁={mean_ivon[0]:.4f}, w₂={mean_ivon[1]:.4f}, sum={mean_ivon.sum():.4f}")
-    print(f"  IVONLR: w₁={mean_ivonlr[0]:.4f}, w₂={mean_ivonlr[1]:.4f}, sum={mean_ivonlr.sum():.4f}")
+    print(f"\nLearned parameters (posterior mean ± std):")
+    print(f"  True:   w₁={1.0:.4f}, w₂={2.0:.4f}, sum={3.0:.4f}")
+    print(f"  IVON:   w₁={mean_ivon[0]:.4f}±{std_ivon[0]:.4f}, w₂={mean_ivon[1]:.4f}±{std_ivon[1]:.4f}, sum={mean_ivon.sum():.4f}±{samples_ivon.sum(1).std():.4f}")
+    print(f"  IVONLR: w₁={mean_ivonlr[0]:.4f}±{std_ivonlr[0]:.4f}, w₂={mean_ivonlr[1]:.4f}±{std_ivonlr[1]:.4f}, sum={mean_ivonlr.sum():.4f}±{samples_ivonlr.sum(1).std():.4f}")
 
     print(f"\nCorrelation between w₁ and w₂:")
     print(f"  IVON:   {corr_ivon:+.4f} (near zero)")
