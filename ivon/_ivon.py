@@ -113,7 +113,6 @@ class IVON(torch.optim.Optimizer):
         self.state['avg_grad'] = None
         self.state['avg_nxg'] = None
         self.state['avg_gsq'] = None
-        self.state['avg_lr_z'] = {}  # IVONLR: store per-group low-rank noise projections z
 
     def _init_buffers(self):
         for group in self.param_groups:
@@ -293,7 +292,7 @@ class IVON(torch.optim.Optimizer):
     def _new_hess(
         method, hess, avg_nxg, avg_gsq, pg_slice, ess, beta2, wd
     ) -> Tensor:
-        f = IVONLR._get_nll_hess(
+        f = IVON._get_nll_hess(
             method, hess + wd, avg_nxg, avg_gsq, pg_slice
         ) * ess
         return beta2 * hess + (1.0 - beta2) * f + \
