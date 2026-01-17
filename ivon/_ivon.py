@@ -429,7 +429,6 @@ class IVONLR(torch.optim.Optimizer):
         self.state['avg_grad'] = None
         self.state['avg_nxg'] = None
         self.state['avg_gsq'] = None
-        self.state['avg_lr_z'] = {}  # IVONLR: store per-group low-rank noise projections z
 
     def _init_buffers(self):
         for group in self.param_groups:
