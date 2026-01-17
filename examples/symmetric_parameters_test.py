@@ -167,15 +167,17 @@ def plot_symmetric(cfg: Config, samples_ivon, samples_ivonlr, w1_true, w2_true, 
     ax2.grid(True, alpha=0.3, linestyle='--')
     ax2.set_aspect('equal', adjustable='box')
 
-    # Set same limits
-    all_samples = torch.cat([samples_ivon, samples_ivonlr], dim=0)
-    margin = 0.3
-    xlim = [all_samples[:, 0].min() - margin, all_samples[:, 0].max() + margin]
-    ylim = [all_samples[:, 1].min() - margin, all_samples[:, 1].max() + margin]
-    ax1.set_xlim(xlim)
-    ax1.set_ylim(ylim)
-    ax2.set_xlim(xlim)
-    ax2.set_ylim(ylim)
+
+    def set_limits(ax, samples):
+        margin = 0.3
+        xlim = [samples[:, 0].min() - margin, samples[:, 0].max() + margin]
+        ylim = [samples[:, 1].min() - margin, samples[:, 1].max() + margin]
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
+
+    set_limits(ax1, samples_ivon)
+    set_limits(ax2, samples_ivonlr)
+    
 
     # 3. Statistics panel
     ax3 = fig.add_subplot(133)
