@@ -6,7 +6,7 @@ from torch import nn
 import matplotlib.pyplot as plt
 
 from ivon._ivon import IVON
-from ivon.fixed_ivonlr import IVONLR
+from ivon._ivon import IVONLR
 
 
 
@@ -113,7 +113,7 @@ def main():
     for ax, mat, title in zip(
         axes,
         [cov_true, cov_ivon, cov_lr],
-        ["True Posterior", "IVON", "IVONLR (fixed)"],
+        ["True Posterior", "IVON", "IVONLR"],
     ):
         im = ax.imshow(mat, cmap="coolwarm", vmin=-vmax, vmax=vmax)
         ax.set_title(title, fontsize=12, fontweight="bold")
@@ -121,8 +121,8 @@ def main():
         ax.set_yticks([])
     fig.colorbar(im, ax=axes, fraction=0.03, pad=0.02)
     fig.tight_layout()
-    fig.savefig("plots/covariance_heatmap.png", dpi=150, bbox_inches="tight")
-    print("✓ Saved to plots/covariance_heatmap.png")
+    fig.savefig("plots/covariance_heatmap.pdf", bbox_inches="tight")
+    print("✓ Saved to plots/covariance_heatmap.pdf")
 
 
 if __name__ == "__main__":

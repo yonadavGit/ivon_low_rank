@@ -7,7 +7,7 @@ from torch import nn
 import matplotlib.pyplot as plt
 
 from ivon._ivon import IVON
-from ivon.fixed_ivonlr import IVONLR
+from ivon._ivon import IVONLR
 
 
 def make_toeplitz(n_samples=1000, n_dims=20, rho=0.8, noise_std=0.2, seed=42):
@@ -35,7 +35,7 @@ def make_block(n_samples=1000, n_dims=20, rho=0.85, noise_std=0.2, seed=42):
     return x, y
 
 
-def make_low_rank(n_samples=1000, n_dims=20, rank=4, noise_std=0.2, seed=42):
+def make_low_rank(n_samples=1000, n_dims=20, rank=10, noise_std=0.2, seed=42):
     torch.manual_seed(seed)
     z = torch.randn(n_samples, rank)
     b = torch.randn(rank, n_dims)
@@ -119,17 +119,17 @@ def run_case(name, make_fn, n_dims=20, noise_std=0.2, weight_decay=1e-3, rank=10
     for ax, mat, title in zip(
         axes,
         [cov_true, cov_ivon, cov_lr],
-        ["True Posterior", "IVON", "IVONLR (fixed)"],
+        ["True Posterior", "IVON", "IVONLR"],
     ):
         im = ax.imshow(mat, cmap="coolwarm", vmin=-vmax, vmax=vmax)
         ax.set_title(title, fontsize=12, fontweight="bold")
         ax.set_xticks([])
         ax.set_yticks([])
-    fig.colorbar(im, ax=axes, fraction=0.03, pad=0.02)
+    fig.colorbar(im, ax=axes, fraction=0.03, pad=0.12)
     fig.suptitle(f"Case: {name}", fontsize=12, fontweight="bold")
-    fig.tight_layout()
-    out = f"plots/cov_heatmap_{name}.png"
-    fig.savefig(out, dpi=150, bbox_inches="tight")
+    fig.tight_layout(rect=[0, 0, 0.85, 0.95])
+    out = f"plots/cov_heatmap_{name}.pdf"
+    fig.savefig(out, bbox_inches="tight")
     print(f"✓ Saved {out}")
 
 

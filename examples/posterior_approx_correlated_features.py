@@ -5,8 +5,8 @@ import torch
 from torch import nn
 
 from ivon._ivon import IVON, IVONLR
-from ivon.fixed_ivonlr import IVONLR as IVONLRFixed
-from ivon.cov_ivonlr import IVONLRCov
+from ivon._ivon import IVONLR as IVONLRFixed
+from ivon._ivon import IVONLR as IVONLRCov
 
 
 def make_data(n_samples=1000, n_dims=20, noise_std=0.2, rho=0.8, seed=42):

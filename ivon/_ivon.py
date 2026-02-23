@@ -317,25 +317,30 @@ class IVONLR(torch.optim.Optimizer):
     )
 
     def __init__(
-        self,
-        params,
-        lr: float,
-        ess: float,
-        hess_init: float = 1.0,
-        beta1: float = 0.9,
-        beta2: float = 0.99999,
-        weight_decay: float = 1e-4,
-        mc_samples: int = 1,
-        hess_approx: str = 'price',
-        clip_radius: float = float("inf"),
-        sync: bool = False,
-        debias: bool = True,
-        rescale_lr: bool = True,
-        rank: int = 8,
-        beta3: float = 0.95,
-        eta_u: float = 0.1,
-        orth_every: int = 1,
-        low_rank_init: float = 1e-6,
+            self,
+            params,
+            lr: float,
+            ess: float,
+            hess_init: float = 1.0,
+            beta1: float = 0.9,
+            beta2: float = 0.99999,
+            weight_decay: float = 1e-4,
+            mc_samples: int = 1,
+            hess_approx: str = "price",
+            clip_radius: float = float("inf"),
+            sync: bool = False,
+            debias: bool = True,
+            rescale_lr: bool = True,
+            rank: int = 8,
+            beta3: float = 0.95,
+            eta_u: float = 0.1,
+            orth_every: int = 1,
+            low_rank_init: float = 1e-6,
+            # --- add these (they are referenced below) ---
+            s_scale: float = 1.0,
+            v_max: float = 1e3,
+            alpha_min: float = 1e-8,
+            alpha_max: float = 1e2,
     ):
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -367,6 +372,14 @@ class IVONLR(torch.optim.Optimizer):
             raise ValueError(
                 "Invalid low_rank_init parameter: {}".format(low_rank_init)
             )
+        if not 0.0 < s_scale:
+            raise ValueError("Invalid s_scale parameter: {}".format(s_scale))
+        if not 0.0 < v_max:
+            raise ValueError("Invalid v_max parameter: {}".format(v_max))
+        if not 0.0 <= alpha_min:
+            raise ValueError("Invalid alpha_min parameter: {}".format(alpha_min))
+        if not alpha_min < alpha_max:
+            raise ValueError("Invalid alpha_max parameter: {}".format(alpha_max))
         if rank < 0:
             raise ValueError("Invalid rank parameter: {}".format(rank))
         if hess_approx not in self.hessian_approx_methods:
@@ -386,6 +399,10 @@ class IVONLR(torch.optim.Optimizer):
             eta_u=eta_u,
             orth_every=orth_every,
             low_rank_init=low_rank_init,
+            s_scale=s_scale,
+            v_max=v_max,
+            alpha_min=alpha_min,
+            alpha_max=alpha_max,
         )
         super().__init__(params, defaults)
 
@@ -425,10 +442,13 @@ class IVONLR(torch.optim.Optimizer):
         return total, device, dtype
 
     def _reset_samples(self):
-        self.state['count'] = 0
-        self.state['avg_grad'] = None
-        self.state['avg_nxg'] = None
-        self.state['avg_gsq'] = None
+        self.state["count"] = 0
+        self.state["avg_grad"] = None
+        self.state["avg_nxg"] = None
+        self.state["avg_gsq"] = None
+        for group in self.param_groups:
+            group["avg_gw"] = None
+            group["avg_gw2"] = None
 
     def _init_buffers(self):
         for group in self.param_groups:
@@ -444,16 +464,14 @@ class IVONLR(torch.optim.Optimizer):
             ).add(torch.as_tensor(hess_init))
 
             if rank == 0:
-                # IVONLR only: no low-rank state when rank == 0.
                 group["U"] = torch.zeros(
                     numel, 0, device=self._device, dtype=self._dtype
                 )
-                group["s"] = torch.zeros(
-                    0, device=self._device, dtype=self._dtype
-                )
+                group["s"] = torch.zeros(0, device=self._device, dtype=self._dtype)
+                group["avg_gw"] = None
+                group["avg_gw2"] = None
                 continue
 
-            # IVONLR only: initialize low-rank directions and variances.
             init = torch.randn(
                 numel, rank, device=self._device, dtype=self._dtype
             ) * 0.01
@@ -464,6 +482,8 @@ class IVONLR(torch.optim.Optimizer):
                 device=self._device,
                 dtype=self._dtype,
             )
+            group["avg_gw"] = None
+            group["avg_gw2"] = None
 
     @contextmanager
     def sampled_params(self, train: bool = False):
@@ -490,7 +510,7 @@ class IVONLR(torch.optim.Optimizer):
                     else:
                         param_grads.append(torch.zeros_like(p).flatten())
                 offset += p.numel()
-        assert offset == self._numel  # sanity check
+        assert offset == self._numel
 
         if train:
             grad_sample = torch.cat(param_grads, 0)
@@ -499,13 +519,30 @@ class IVONLR(torch.optim.Optimizer):
             self.state["avg_grad"] = _welford_mean(
                 self.state["avg_grad"], grad_sample, count
             )
-            if self.hess_approx == 'price':
-                # IVONLR: Use diagonal noise only, not total noise (to avoid feedback loop)
-                self.state['avg_nxg'] = _welford_mean(
-                    self.state['avg_nxg'], diag_noise * grad_sample, count)
-            elif self.hess_approx == 'gradsq':
-                self.state['avg_gsq'] = _welford_mean(
-                    self.state['avg_gsq'], grad_sample.square(), count)
+            if self.hess_approx == "price":
+                # Use diagonal noise only to avoid feedback loop.
+                self.state["avg_nxg"] = _welford_mean(
+                    self.state["avg_nxg"], diag_noise * grad_sample, count
+                )
+            elif self.hess_approx == "gradsq":
+                self.state["avg_gsq"] = _welford_mean(
+                    self.state["avg_gsq"], grad_sample.square(), count
+                )
+
+            offset = 0
+            for group in self.param_groups:
+                gnumel = group["numel"]
+                if group["rank"] > 0 and gnumel > 0:
+                    g = grad_sample[offset : offset + gnumel]
+                    h = (group["hess"] + group["weight_decay"]).clamp_min(1e-12)
+                    g_w = g / h.sqrt()
+                    group["avg_gw"] = _welford_mean(group["avg_gw"], g_w, count)
+                    group["avg_gw2"] = _welford_mean(group["avg_gw2"], g_w.square(), count)
+                    var_w = (group["avg_gw2"] - group["avg_gw"].square()).clamp_min(0.0)
+                    alpha = (var_w.mean() * group["ess"]).clamp_min(group["alpha_min"]).clamp_max(group["alpha_max"])
+                    self._update_low_rank_sample(group, g_w, alpha)
+                offset += gnumel
+            assert offset == self._numel
 
     @torch.no_grad()
     def step(self, closure: ClosureType = None) -> Optional[Tensor]:
@@ -528,8 +565,22 @@ class IVONLR(torch.optim.Optimizer):
         world_size = dist.get_world_size()
         dist.all_reduce(self.state["avg_grad"])
         self.state["avg_grad"].div_(world_size)
-        dist.all_reduce(self.state["avg_nxg"])
-        self.state["avg_nxg"].div_(world_size)
+
+        if self.hess_approx == "price" and self.state["avg_nxg"] is not None:
+            dist.all_reduce(self.state["avg_nxg"])
+            self.state["avg_nxg"].div_(world_size)
+
+        if self.hess_approx == "gradsq" and self.state["avg_gsq"] is not None:
+            dist.all_reduce(self.state["avg_gsq"])
+            self.state["avg_gsq"].div_(world_size)
+
+        for group in self.param_groups:
+            if group.get("avg_gw") is not None:
+                dist.all_reduce(group["avg_gw"])
+                group["avg_gw"].div_(world_size)
+            if group.get("avg_gw2") is not None:
+                dist.all_reduce(group["avg_gw2"])
+                group["avg_gw2"].div_(world_size)
 
     def _sample_params(self) -> Tuple[Tensor, Tensor, Tensor]:
         noise_samples = []
@@ -539,26 +590,21 @@ class IVONLR(torch.optim.Optimizer):
         offset = 0
         for group in self.param_groups:
             gnumel = group["numel"]
-            scale = (
-                group["ess"] * (group["hess"] + group["weight_decay"])
-            ).sqrt()
-            # IVONLR difference: diagonal noise matches IVON, then add correlated noise.
-            diag_noise = torch.randn(
-                gnumel, device=self._device, dtype=self._dtype
-            ) / scale
+            h = (group["hess"] + group["weight_decay"]).clamp_min(1e-12)
+            D = group["ess"] * h
+            Dinv_sqrt = D.rsqrt()
+            eps = torch.randn(gnumel, device=self._device, dtype=self._dtype)
+            diag_noise = eps * Dinv_sqrt
 
             if group["rank"] > 0:
-                # IVONLR only: low-rank component with Hessian-scale eigenvalues s
-                # Sample with variance 1/(ess*s): noise_std = 1/sqrt(ess*s)
-                z = torch.randn(
-                    group["rank"], device=self._device, dtype=self._dtype
-                )
-                # s are Hessian eigenvalues, so variance is 1/(ess*s)
-                correlated = group["U"] @ (z / (group["ess"] * group["s"].clamp_min(1e-8)).sqrt())
+                U = group["U"]
+                s = group["s"].clamp_min(0.0)
+                shrink = 1.0 - (1.0 + s).rsqrt()
+                y = eps - U @ (shrink * (U.transpose(0, 1) @ eps))
             else:
-                correlated = torch.zeros_like(diag_noise)
+                y = eps
 
-            noise_sample = diag_noise + correlated
+            noise_sample = Dinv_sqrt * y
             noise_samples.append(noise_sample)
             diag_noise_samples.append(diag_noise)
 
@@ -575,10 +621,14 @@ class IVONLR(torch.optim.Optimizer):
                 p.data = (p_avg + p_noise).view(p.shape)
                 goffset += numel
                 offset += numel
-            assert goffset == group["numel"]  # sanity check
-        assert offset == self._numel  # sanity check
+            assert goffset == group["numel"]
+        assert offset == self._numel
 
-        return torch.cat(param_avgs, 0), torch.cat(noise_samples, 0), torch.cat(diag_noise_samples, 0)
+        return (
+            torch.cat(param_avgs, 0),
+            torch.cat(noise_samples, 0),
+            torch.cat(diag_noise_samples, 0),
+        )
 
     def _update(self):
         self.current_step += 1
@@ -602,18 +652,14 @@ class IVONLR(torch.optim.Optimizer):
                 self.hess_approx,
                 group["hess"],
                 self.state["avg_nxg"],
-                self.state['avg_gsq'],
+                self.state["avg_gsq"],
                 pg_slice,
                 group["ess"],
                 b2,
                 group["weight_decay"],
             )
 
-            debias = (
-                1.0 - pow(b1, float(self.current_step))
-                if self.debias
-                else 1.0
-            )
+            debias = 1.0 - pow(b1, float(self.current_step)) if self.debias else 1.0
             param_avg = self._new_param_averages(
                 param_avg,
                 group["hess"],
@@ -634,22 +680,20 @@ class IVONLR(torch.optim.Optimizer):
                         p.shape
                     )
                     pg_offset += p.numel()
-            assert pg_offset == group["numel"]  # sanity check
+            assert pg_offset == group["numel"]
 
-            # IVONLR only: update low-rank directions after IVON-style update.
             self._update_low_rank(group, debias)
 
             offset += group["numel"]
-        assert offset == self._numel  # sanity check
+        assert offset == self._numel
 
     @staticmethod
     def _get_nll_hess(method: str, hess, avg_nxg, avg_gsq, pg_slice) -> Tensor:
-        if method == 'price':
+        if method == "price":
             return avg_nxg[pg_slice] * hess
-        elif method == 'gradsq':
+        if method == "gradsq":
             return avg_gsq[pg_slice]
-        else:
-            raise NotImplementedError(f'unknown hessian approx.: {method}')
+        raise NotImplementedError(f"unknown hessian approx.: {method}")
 
     @staticmethod
     def _new_momentum(avg_grad, m, b1) -> Tensor:
@@ -659,11 +703,15 @@ class IVONLR(torch.optim.Optimizer):
     def _new_hess(
         method, hess, avg_nxg, avg_gsq, pg_slice, ess, beta2, wd
     ) -> Tensor:
-        f = IVON._get_nll_hess(
-            method, hess + wd, avg_nxg, avg_gsq, pg_slice
-        ) * ess
-        return beta2 * hess + (1.0 - beta2) * f + \
-            (0.5 * (1 - beta2) ** 2) * (hess - f).square() / (hess + wd)
+        f = (
+            IVONLR._get_nll_hess(method, hess + wd, avg_nxg, avg_gsq, pg_slice)
+            * ess
+        )
+        return (
+            beta2 * hess
+            + (1.0 - beta2) * f
+            + (0.5 * (1 - beta2) ** 2) * (hess - f).square() / (hess + wd)
+        )
 
     @staticmethod
     def _new_param_averages(
@@ -679,26 +727,35 @@ class IVONLR(torch.optim.Optimizer):
         if group["rank"] == 0:
             return
 
-        # IVONLR only: low-rank updates based on the debiased gradient.
-        g = group["momentum"] / debias
-
-        # Project onto current low-rank subspace
-        a = group["U"].transpose(0, 1) @ g
-        a2 = a.square()
-
-        # Update eigenvalues with moving average
-        # Scale by ess (not 1/ess!) to get curvature eigenvalues matching hess scale
-        # Then we'll divide by ess in sampling to get the right variance scale
-        group["s"] = group["beta3"] * group["s"] + (1.0 - group["beta3"]) * a2 * group["ess"]
-
-        # IVONLR only: Oja-style update toward dominant directions.
-        update = g.unsqueeze(1) * a.unsqueeze(0) - group["U"] * a2.unsqueeze(0)
-        group["U"] = group["U"] + group["eta_u"] * update
-
         orth_every = group["orth_every"]
         if orth_every > 0 and self.current_step % orth_every == 0:
-            # IVONLR only: periodic orthonormalization of U.
             group["U"] = self._orthonormalize(group["U"])
+
+    @torch.no_grad()
+    def _update_low_rank_sample(self, group, g_w: Tensor, alpha: Tensor):
+        if group["rank"] == 0:
+            return
+
+        g_u = g_w / (g_w.norm() + 1e-12)
+
+        U = group["U"]
+        a_v = U.t() @ g_w
+        a_u = U.t() @ g_u
+        a_v2 = a_v.square()
+        a_u2 = a_u.square()
+
+        beta3 = group["beta3"]
+        denom = a_v2.mean().clamp_min(1e-12)
+        scaled = (a_v2 / denom) * alpha * group["s_scale"]
+        v = beta3 * group["s"] + (1.0 - beta3) * scaled
+        group["s"] = v.clamp_min(1e-12).clamp_max(group["v_max"])
+
+        eta = group["eta_u"]
+        U = U + eta * (g_u.unsqueeze(1) * a_u.unsqueeze(0) - U * a_u2.unsqueeze(0))
+        orth_every = group["orth_every"]
+        if orth_every > 0 and self.state["count"] % orth_every == 0:
+            U = self._orthonormalize(U)
+        group["U"] = U
 
     @staticmethod
     def _orthonormalize(U: Tensor) -> Tensor:
